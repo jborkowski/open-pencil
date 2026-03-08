@@ -14,6 +14,8 @@
     "build:app": "oxlint -c oxlint.json --type-aware --type-check src/ && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "lint": "turbo lint",
     "format": "oxfmt --write src/",
     "typecheck": "oxlint -c oxlint.json --type-aware --type-check src/ packages/core/src packages/cli/src packages/mcp/src packages/acp/src",
