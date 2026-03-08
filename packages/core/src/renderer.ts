@@ -152,12 +152,18 @@ export class SkiaRenderer {
   private fontsLoaded = false
   private imageCache = new Map<string, CKImage>()
   private vectorPathCache = new Map<string, Path[]>()
+  private vectorPathCacheOrder: string[] = []
   private fillGeometryCache = new Map<string, Path[]>()
+  private fillGeometryCacheOrder: string[] = []
   private strokeGeometryCache = new Map<string, Path[]>()
+  private strokeGeometryCacheOrder: string[] = []
+  private static readonly MAX_PATH_CACHE_SIZE = 10000
   private scenePicture: SkPicture | null = null
   private scenePictureVersion = -1
   private scenePicturePageId: string | null = null
   private nodePictureCache = new Map<string, SkPicture>()
+  private nodePictureCacheOrder: string[] = []
+  private static readonly MAX_NODE_PICTURE_CACHE_SIZE = 5000
   readonly profiler: RenderProfiler
 
   private rulerBgPaint: Paint
@@ -367,6 +373,7 @@ export class SkiaRenderer {
     this.invalidateScenePicture()
     for (const pic of this.nodePictureCache.values()) pic.delete()
     this.nodePictureCache.clear()
+    this.nodePictureCacheOrder.length = 0
   }
 
   invalidateNodePicture(nodeId: string): void {
@@ -374,6 +381,24 @@ export class SkiaRenderer {
     if (pic) {
       pic.delete()
       this.nodePictureCache.delete(nodeId)
+      const idx = this.nodePictureCacheOrder.indexOf(nodeId)
+      if (idx >= 0) this.nodePictureCacheOrder.splice(idx, 1)
+    }
+  }
+
+  private evictNodePictureLRU(): void {
+    while (
+      this.nodePictureCacheOrder.length >= SkiaRenderer.MAX_NODE_PICTURE_CACHE_SIZE &&
+      this.nodePictureCacheOrder.length > 0
+    ) {
+      const oldest = this.nodePictureCacheOrder.shift()
+      if (oldest) {
+        const pic = this.nodePictureCache.get(oldest)
+        if (pic) {
+          pic.delete()
+          this.nodePictureCache.delete(oldest)
+        }
+      }
     }
   }
 
@@ -1252,12 +1277,35 @@ export class SkiaRenderer {
     canvas.restore()
   }
 
+  private evictPathCacheLRU(
+    cache: Map<string, Path[]>,
+    order: string[],
+    maxSize: number
+  ): void {
+    while (order.length >= maxSize && order.length > 0) {
+      const oldest = order.shift()
+      if (oldest) {
+        const paths = cache.get(oldest)
+        if (paths) {
+          for (const p of paths) p.delete()
+          cache.delete(oldest)
+        }
+      }
+    }
+  }
+
   private getVectorPaths(node: SceneNode): Path[] | null {
     if (!node.vectorNetwork) return null
     const cached = this.vectorPathCache.get(node.id)
     if (cached) return cached
     const paths = vectorNetworkToPath(this.ck, node.vectorNetwork)
     this.vectorPathCache.set(node.id, paths)
+    this.vectorPathCacheOrder.push(node.id)
+    this.evictPathCacheLRU(
+      this.vectorPathCache,
+      this.vectorPathCacheOrder,
+      SkiaRenderer.MAX_PATH_CACHE_SIZE
+    )
     return paths
   }
 
@@ -1269,6 +1317,12 @@ export class SkiaRenderer {
       geometryBlobToPath(this.ck, g.commandsBlob, g.windingRule)
     )
     this.fillGeometryCache.set(node.id, paths)
+    this.fillGeometryCacheOrder.push(node.id)
+    this.evictPathCacheLRU(
+      this.fillGeometryCache,
+      this.fillGeometryCacheOrder,
+      SkiaRenderer.MAX_PATH_CACHE_SIZE
+    )
     return paths
   }
 
@@ -1280,7 +1334,22 @@ export class SkiaRenderer {
       geometryBlobToPath(this.ck, g.commandsBlob, g.windingRule)
     )
     this.strokeGeometryCache.set(node.id, paths)
+    this.strokeGeometryCacheOrder.push(node.id)
+    this.evictPathCacheLRU(
+      this.strokeGeometryCache,
+      this.strokeGeometryCacheOrder,
+      SkiaRenderer.MAX_PATH_CACHE_SIZE
+    )
     return paths
+  }
+
+  private removeFromPathCacheOrder(nodeId: string): void {
+    const vIdx = this.vectorPathCacheOrder.indexOf(nodeId)
+    if (vIdx >= 0) this.vectorPathCacheOrder.splice(vIdx, 1)
+    const fIdx = this.fillGeometryCacheOrder.indexOf(nodeId)
+    if (fIdx >= 0) this.fillGeometryCacheOrder.splice(fIdx, 1)
+    const sIdx = this.strokeGeometryCacheOrder.indexOf(nodeId)
+    if (sIdx >= 0) this.strokeGeometryCacheOrder.splice(sIdx, 1)
   }
 
   invalidateVectorPath(nodeId: string): void {
@@ -1296,6 +1365,7 @@ export class SkiaRenderer {
         cache.delete(nodeId)
       }
     }
+    this.removeFromPathCacheOrder(nodeId)
   }
 
   private strokeNodeShape(canvas: Canvas, node: SceneNode, paint: Paint): void {
@@ -1633,6 +1703,8 @@ export class SkiaRenderer {
       const picture = recorder.finishRecordingAsPicture()
       recorder.delete()
       this.nodePictureCache.set(node.id, picture)
+      this.nodePictureCacheOrder.push(node.id)
+      this.evictNodePictureLRU()
       canvas.drawPicture(picture)
     } else {
       this.renderShapeUncached(canvas, node, graph)
@@ -3169,6 +3241,9 @@ export class SkiaRenderer {
       }
       cache.clear()
     }
+    this.vectorPathCacheOrder.length = 0
+    this.fillGeometryCacheOrder.length = 0
+    this.strokeGeometryCacheOrder.length = 0
     this.fillPaint.delete()
     this.strokePaint.delete()
     this.selectionPaint.delete()
@@ -3198,6 +3273,7 @@ export class SkiaRenderer {
     this.maskFilterCache.clear()
     for (const pic of this.nodePictureCache.values()) pic?.delete()
     this.nodePictureCache.clear()
+    this.nodePictureCacheOrder.length = 0
     this.scenePicture?.delete()
     this._flashPaint?.delete()
     this.profiler.destroy()
