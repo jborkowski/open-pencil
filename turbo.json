@@ -14,9 +14,6 @@
     },
     "typecheck": {
       "dependsOn": []
-    },
-    "test:unit": {
-      "dependsOn": ["^build"]
     }
   }
 }

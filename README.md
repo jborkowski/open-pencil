@@ -148,9 +148,8 @@ Security defaults for HTTP transport:
 | `bun run dev` | Dev server at http://localhost:1420 |
 | `bun run build` | Production build |
 | `bun run check` | Lint + typecheck |
-| `bun run test` | E2E visual regression |
-| `bun run test:update` | Regenerate screenshot baselines |
-| `bun run test:unit` | Unit tests |
+| `bun run test` | Unit tests (bun:test) |
+| `bun run test:e2e` | Playwright visual regression (run `test:e2e:install` first) |
 | `bun run tauri dev` | Desktop app (requires Rust) |
 
 ## Desktop App

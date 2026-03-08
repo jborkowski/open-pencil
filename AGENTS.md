@@ -65,8 +65,7 @@ Run all quality gates (see [Code quality](#code-quality) for the self-review che
 bun run check          # oxlint + typecheck
 bun run format         # oxfmt
 bun run test:dupes     # jscpd < 3%
-bun run test:unit      # bun:test
-bun run test           # Playwright E2E
+bun run test           # bun:test unit tests
 ```
 
 ## Documentation
@@ -144,8 +143,7 @@ Before submitting a PR, run the full quality gate and do a self-review:
 bun run check          # oxlint + typecheck — zero errors required
 bun run format         # oxfmt with import sorting
 bun run test:dupes     # jscpd — must stay under 3% duplication
-bun run test:unit      # bun:test
-bun run test           # Playwright E2E
+bun run test           # bun:test unit tests
 ```
 
 Self-review checklist:

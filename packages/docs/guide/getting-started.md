@@ -47,9 +47,8 @@ Opens the editor at `http://localhost:1420`.
 | `bun run dev` | Dev server with HMR |
 | `bun run build` | Production build |
 | `bun run check` | Lint (oxlint) + typecheck (tsgo) |
-| `bun run test` | E2E visual regression (Playwright) |
-| `bun run test:update` | Regenerate screenshot baselines |
-| `bun run test:unit` | Unit tests (bun:test) |
+| `bun run test` | Unit tests (bun:test) |
+| `bun run test:e2e` | E2E visual regression (run `test:e2e:install` first) |
 | `bun run docs:dev` | Documentation dev server |
 | `bun run docs:build` | Build documentation site |
 
