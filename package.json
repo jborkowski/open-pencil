@@ -31,6 +31,7 @@
     "docs:preview": "bun --filter @open-pencil/docs preview",
     "visual-compare": "bun scripts/visual-compare.ts",
     "profile-fig-parse": "bun scripts/profile-fig-parse.ts",
+    "profile-fig-parse-worker": "bun scripts/profile-fig-parse-worker.ts",
     "profile-fig-parse-memory": "bun scripts/profile-fig-parse-memory.ts"
   },
   "dependencies": {
