@@ -599,7 +599,8 @@ export function createEditorStore() {
 
       const doProfile = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_PARSE_PROFILE__?: boolean }).__FIG_PARSE_PROFILE__
       let imported: SceneGraph
-      if (typeof Worker !== 'undefined') {
+      const noWorker = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_NO_WORKER__?: boolean }).__FIG_NO_WORKER__
+      if (typeof Worker !== 'undefined' && !noWorker) {
         imported = await parseFigFileInWorker(await file.arrayBuffer(), { profile: doProfile })
       } else {
         if (doProfile) {
@@ -766,7 +767,8 @@ export function createEditorStore() {
     }
 
     const doProfile = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_PARSE_PROFILE__?: boolean }).__FIG_PARSE_PROFILE__
-    if (typeof Worker !== 'undefined') {
+    const noWorker = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_NO_WORKER__?: boolean }).__FIG_NO_WORKER__
+    if (typeof Worker !== 'undefined' && !noWorker) {
       graph = await parseFigFileInWorker(await file.arrayBuffer(), { profile: doProfile })
     } else {
       graph = await readFigFile(file)

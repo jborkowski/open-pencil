@@ -59,7 +59,6 @@ export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
   })
   profileStage('1_unzipSync', t0)
 
-  const t1 = profileStart()
   const entries = Object.keys(zip)
   let canvasData: Uint8Array | null = null
   for (const name of entries) {
@@ -135,39 +134,99 @@ export async function readFigFile(file: File): Promise<SceneGraph> {
   return parseFigFile(buffer)
 }
 
+type ProfileStages = Array<{ stage: string; ms: number }>
+
 /**
- * Parse a .fig file in a Web Worker to keep the main thread responsive.
- * Use when `typeof Worker !== 'undefined'` (browser). Falls back not supported — call parseFigFile directly.
- * Pass profile: true to collect and return stage timings (for performance investigation).
+ * Run a single worker stage, returning its success payload.
+ * The worker is always terminated after it posts back (success or error).
  */
-export function parseFigFileInWorker(
-  buffer: ArrayBuffer,
-  options?: { profile?: boolean }
-): Promise<SceneGraph> {
-  const profile = options?.profile ?? false
+function runWorkerStage<TIn, TOut>(
+  url: URL,
+  input: TIn,
+  transfer: Transferable[]
+): Promise<TOut & { profile?: ProfileStages }> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./fig-file.worker.ts', import.meta.url), {
-      type: 'module'
-    })
-    worker.onmessage = (e: MessageEvent<{ type: string; data?: unknown; message?: string; profile?: Array<{ stage: string; ms: number }> }>) => {
+    const worker = new Worker(url, { type: 'module' })
+    worker.onmessage = (e: MessageEvent<{ type: string; message?: string; profile?: ProfileStages } & TOut>) => {
       worker.terminate()
-      if (e.data.type === 'success' && e.data.data) {
-        if (profile && e.data.profile) {
-          ;(globalThis as unknown as { __FIG_PARSE_PROFILE_RESULT__?: Array<{ stage: string; ms: number }> }).__FIG_PARSE_PROFILE_RESULT__ =
-            e.data.profile
-        }
-        resolve(SceneGraph.fromPlainData(e.data.data as Parameters<typeof SceneGraph.fromPlainData>[0]))
+      if (e.data.type === 'success') {
+        resolve(e.data)
       } else if (e.data.type === 'error' && e.data.message) {
         reject(new Error(e.data.message))
       } else {
         reject(new Error('Unknown worker response'))
       }
     }
-    worker.onerror = (err) => {
-      worker.terminate()
-      reject(err)
-    }
-    worker.postMessage(profile ? { buffer, profile: true } : buffer, { transfer: [buffer] })
+    worker.onerror = (err) => { worker.terminate(); reject(err) }
+    worker.postMessage(input, { transfer })
   })
+}
+
+/**
+ * Parse a .fig file using a 3-stage Worker pipeline.
+ * Each worker is terminated before the next starts, freeing VRAM/memory.
+ *
+ * Stage 1 (unzip):  .fig buffer → schema bytes + kiwi data + images
+ * Stage 2 (parse):  kiwi decode + importNodeChanges → serialized SceneGraph
+ * Stage 3 (layout): computeAllLayouts → final serialized SceneGraph
+ *
+ * Pass profile: true to collect and return stage timings.
+ */
+export async function parseFigFileInWorker(
+  buffer: ArrayBuffer,
+  options?: { profile?: boolean }
+): Promise<SceneGraph> {
+  const profile = options?.profile ?? false
+  const allStages: ProfileStages = []
+
+  // Stage 1: Unzip
+  type S1Out = { schemaBytes: Uint8Array; dataRaw: Uint8Array; images: Array<[string, Uint8Array]> }
+  const s1 = await runWorkerStage<unknown, S1Out>(
+    new URL('./fig-unzip.worker.ts', import.meta.url),
+    { buffer, profile },
+    [buffer]
+  )
+  if (s1.profile) allStages.push(...s1.profile)
+
+  // Stage 2: Kiwi decode + import
+  const s2Transfer: Transferable[] = []
+  const seen = new Set<ArrayBuffer>()
+  for (const buf of [s1.schemaBytes.buffer as ArrayBuffer, s1.dataRaw.buffer as ArrayBuffer]) {
+    if (!seen.has(buf)) { seen.add(buf); s2Transfer.push(buf) }
+  }
+  for (const [, bytes] of s1.images) {
+    const buf = bytes.buffer as ArrayBuffer
+    if (!seen.has(buf)) { seen.add(buf); s2Transfer.push(buf) }
+  }
+
+  type S2Out = { data: Parameters<typeof SceneGraph.fromPlainData>[0] }
+  const s2 = await runWorkerStage<unknown, S2Out>(
+    new URL('./fig-parse.worker.ts', import.meta.url),
+    { schemaBytes: s1.schemaBytes, dataRaw: s1.dataRaw, images: s1.images, profile },
+    s2Transfer
+  )
+  if (s2.profile) allStages.push(...s2.profile)
+
+  // Stage 3: Layout
+  const s3Transfer: Transferable[] = []
+  const seen3 = new Set<ArrayBuffer>()
+  for (const [, bytes] of s2.data.images) {
+    const buf = bytes.buffer as ArrayBuffer
+    if (!seen3.has(buf)) { seen3.add(buf); s3Transfer.push(buf) }
+  }
+
+  type S3Out = { data: Parameters<typeof SceneGraph.fromPlainData>[0] }
+  const s3 = await runWorkerStage<unknown, S3Out>(
+    new URL('./fig-layout.worker.ts', import.meta.url),
+    { data: s2.data, profile },
+    s3Transfer
+  )
+  if (s3.profile) allStages.push(...s3.profile)
+
+  if (profile && allStages.length > 0) {
+    ;(globalThis as unknown as { __FIG_PARSE_PROFILE_RESULT__?: ProfileStages }).__FIG_PARSE_PROFILE_RESULT__ = allStages
+  }
+
+  return SceneGraph.fromPlainData(s3.data)
 }
 
