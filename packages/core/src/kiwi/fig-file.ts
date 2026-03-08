@@ -8,12 +8,16 @@ import { isZstdCompressed } from './protocol'
 import type { SceneGraph } from '../scene-graph'
 import type { FigmaMessage } from './codec'
 
-interface FigKiwiPayload {
+export interface FigKiwiPayload {
   schemaDeflated: Uint8Array
   dataRaw: Uint8Array
 }
 
-function parseFigKiwiContainer(data: Uint8Array): FigKiwiPayload | null {
+/**
+ * Parse fig-kiwi container from canvas data.
+ * Exported for test fixture extraction (extract-kiwi-fixture).
+ */
+export function parseFigKiwiContainer(data: Uint8Array): FigKiwiPayload | null {
   const header = new TextDecoder().decode(data.slice(0, 8))
   if (header !== 'fig-kiwi') return null
 
