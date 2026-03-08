@@ -68,7 +68,7 @@ export default defineCommand({
     if (args.write || args.output) {
       const { exportFigFile } = await import('@open-pencil/core')
       const outPath = args.output ?? args.file
-      const data = exportFigFile(graph)
+      const data = await exportFigFile(graph)
       await Bun.write(outPath, data)
       if (!args.quiet) {
         console.error(`Written to ${outPath}`)

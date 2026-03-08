@@ -107,3 +107,4 @@ export async function readFigFile(file: File): Promise<SceneGraph> {
   const buffer = await file.arrayBuffer()
   return parseFigFile(buffer)
 }
+

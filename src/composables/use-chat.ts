@@ -47,7 +47,7 @@ watch(modelId, (id) => {
 
 const isConfigured = computed(() => apiKey.value.length > 0)
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only mock transports don't implement full generics
+// oxlint-disable-next-line typescript/no-explicit-any -- test-only mock transports don't implement full generics
 let overrideTransport: (() => any) | null = null
 
 let chat: Chat<UIMessage> | null = null

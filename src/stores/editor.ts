@@ -596,9 +596,10 @@ export function createEditorStore() {
     try {
       state.loading = true
       await new Promise((r) => requestAnimationFrame(r))
+
       const imported = await readFigFile(file)
+      computeAllLayouts(imported)
       graph = imported
-      computeAllLayouts(graph)
       undo.clear()
       pageViewports.clear()
       fileHandle = handle ?? null
@@ -719,22 +720,20 @@ export function createEditorStore() {
     const viewport = { panX: state.panX, panY: state.panY, zoom: state.zoom }
     const pageId = state.currentPageId
 
+    let file: File
     if (filePath && IS_TAURI) {
       const { readFile: tauriRead } = await import('@tauri-apps/plugin-fs')
       const bytes = await tauriRead(filePath)
       const blob = new Blob([bytes])
-      const file = new File([blob], state.documentName + '.fig')
-      const imported = await readFigFile(file)
-      graph = imported
-      computeAllLayouts(graph)
+      file = new File([blob], state.documentName + '.fig')
     } else if (fileHandle) {
-      const file = await fileHandle.getFile()
-      const imported = await readFigFile(file)
-      graph = imported
-      computeAllLayouts(graph)
+      file = await fileHandle.getFile()
     } else {
       return
     }
+
+    graph = await readFigFile(file)
+    computeAllLayouts(graph)
 
     undo.clear()
     savedVersion = state.sceneVersion

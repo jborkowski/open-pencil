@@ -35,7 +35,7 @@ jobs:
         run: bun run lint
 
       - name: Typecheck
-        run: bunx tsgo --noEmit
+        run: bun run typecheck
 
       - name: Unit tests
         run: bun test tests/engine/

@@ -91,7 +91,6 @@ declare module 'vue' {
     LayoutSection: typeof import('./src/components/properties/LayoutSection.vue')['default']
     MobileDrawer: typeof import('./src/components/MobileDrawer.vue')['default']
     MobileHud: typeof import('./src/components/MobileHud.vue')['default']
-    MobileRibbon: typeof import('./src/components/MobileRibbon.vue')['default']
     NodeContextMenuContent: typeof import('./src/components/NodeContextMenuContent.vue')['default']
     PageSection: typeof import('./src/components/properties/PageSection.vue')['default']
     PagesPanel: typeof import('./src/components/PagesPanel.vue')['default']
