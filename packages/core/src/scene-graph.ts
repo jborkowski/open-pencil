@@ -440,6 +440,33 @@ export class SceneGraph {
     this.addPage('Page 1')
   }
 
+  /**
+   * Reconstruct SceneGraph from Worker postMessage payload.
+   * Used when parse runs in a Web Worker.
+   */
+  static fromPlainData(data: {
+    nodes: Array<[string, SceneNode]>
+    images: Array<[string, Uint8Array]>
+    variables: Array<[string, Variable]>
+    variableCollections: Array<[string, VariableCollection]>
+    activeMode: Array<[string, string]>
+    rootId: string
+  }): SceneGraph {
+    const g = new SceneGraph()
+    g.nodes.clear()
+    g.images.clear()
+    g.variables.clear()
+    g.variableCollections.clear()
+    g.activeMode.clear()
+    for (const [k, v] of data.nodes) g.nodes.set(k, v)
+    for (const [k, v] of data.images) g.images.set(k, v)
+    for (const [k, v] of data.variables) g.variables.set(k, v)
+    for (const [k, v] of data.variableCollections) g.variableCollections.set(k, v)
+    for (const [k, v] of data.activeMode) g.activeMode.set(k, v)
+    g.rootId = data.rootId
+    return g
+  }
+
   addPage(name: string): SceneNode {
     return this.createNode('CANVAS', this.rootId, { name, width: 0, height: 0 })
   }

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, setDefaultTimeout } from 'bun:test'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 
-import { parseFigFile } from '../../packages/core/src/kiwi/fig-file'
+import { parseFigFile, parseFigFileInWorker } from '../../packages/core/src/kiwi/fig-file'
 import { exportFigFile } from '../../packages/core/src/fig-export'
 import { importNodeChanges } from '../../packages/core/src/kiwi/fig-import'
 import { initCodec } from '../../packages/core/src/kiwi/codec'
@@ -68,6 +68,18 @@ beforeAll(async () => {
   const buf = readFileSync(resolve(FIXTURES, 'gold-preview.fig'))
   parsed = await parseFigFile(buf.buffer as ArrayBuffer)
   allNodes = collectAllNodes(parsed)
+})
+
+describe('parseFigFileInWorker', () => {
+  test('output matches parseFigFile for small fixture', async () => {
+    if (typeof Worker === 'undefined') return
+    const buf = readFileSync(resolve(FIXTURES, 'gold-preview.fig'))
+    const direct = await parseFigFile(buf.buffer.slice(0) as ArrayBuffer)
+    const workerGraph = await parseFigFileInWorker(buf.buffer.slice(0) as ArrayBuffer)
+    expect(workerGraph.nodes.size).toBe(direct.nodes.size)
+    expect(workerGraph.getPages().length).toBe(direct.getPages().length)
+    expect(workerGraph.images.size).toBe(direct.images.size)
+  })
 })
 
 describe('parse real .fig files', () => {

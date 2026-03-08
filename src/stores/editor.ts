@@ -30,7 +30,7 @@ import { renderNodesToSVG } from '@/engine/svg-export'
 import { TextEditor } from '@/engine/text-editor'
 import { UndoManager } from '@/engine/undo'
 import { computeVectorBounds } from '@/engine/vector'
-import { readFigFile } from '@/kiwi/fig-file'
+import { readFigFile, parseFigFileInWorker, getFigParseProfile, addFigParseStage, clearFigParseProfile } from '@/kiwi/fig-file'
 
 import type { ExportFormat } from '@/engine/render-image'
 import type {
@@ -597,8 +597,41 @@ export function createEditorStore() {
       state.loading = true
       await new Promise((r) => requestAnimationFrame(r))
 
-      const imported = await readFigFile(file)
-      computeAllLayouts(imported)
+      const doProfile = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_PARSE_PROFILE__?: boolean }).__FIG_PARSE_PROFILE__
+      let imported: SceneGraph
+      if (typeof Worker !== 'undefined') {
+        imported = await parseFigFileInWorker(await file.arrayBuffer(), { profile: doProfile })
+      } else {
+        if (doProfile) {
+          ;(globalThis as unknown as { __FIG_PARSE_PROFILE__: boolean }).__FIG_PARSE_PROFILE__ = true
+          clearFigParseProfile()
+        }
+        imported = await readFigFile(file)
+        if (doProfile) {
+          const tLayout = performance.now()
+          computeAllLayouts(imported)
+          addFigParseStage('5_computeAllLayouts', performance.now() - tLayout)
+          const profile = getFigParseProfile()
+          const total = profile.reduce((s, x) => s + x.ms, 0)
+          console.log(
+            '[fig-parse profile]',
+            ...profile.map((s) => `\n  ${s.stage}: ${s.ms.toFixed(1)}ms (${((100 * s.ms) / total).toFixed(1)}%)`),
+            `\n  total: ${total.toFixed(1)}ms`
+          )
+        }
+        if (!doProfile) computeAllLayouts(imported)
+      }
+      if (typeof Worker !== 'undefined' && doProfile) {
+        const profile = (globalThis as unknown as { __FIG_PARSE_PROFILE_RESULT__?: Array<{ stage: string; ms: number }> }).__FIG_PARSE_PROFILE_RESULT__
+        if (profile) {
+          const total = profile.reduce((s, x) => s + x.ms, 0)
+          console.log(
+            '[fig-parse profile]',
+            ...profile.map((s) => `\n  ${s.stage}: ${s.ms.toFixed(1)}ms (${((100 * s.ms) / total).toFixed(1)}%)`),
+            `\n  total: ${total.toFixed(1)}ms`
+          )
+        }
+      }
       graph = imported
       undo.clear()
       pageViewports.clear()
@@ -732,8 +765,13 @@ export function createEditorStore() {
       return
     }
 
-    graph = await readFigFile(file)
-    computeAllLayouts(graph)
+    const doProfile = typeof globalThis !== 'undefined' && (globalThis as unknown as { __FIG_PARSE_PROFILE__?: boolean }).__FIG_PARSE_PROFILE__
+    if (typeof Worker !== 'undefined') {
+      graph = await parseFigFileInWorker(await file.arrayBuffer(), { profile: doProfile })
+    } else {
+      graph = await readFigFile(file)
+      computeAllLayouts(graph)
+    }
 
     undo.clear()
     savedVersion = state.sceneVersion

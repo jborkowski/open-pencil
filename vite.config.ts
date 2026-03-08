@@ -17,7 +17,8 @@ export default defineConfig(async () => ({
     alias: {
       '@': resolve(__dirname, 'src'),
       shiki: resolve(__dirname, 'src/shims/shiki.ts')
-    }
+    },
+    extensions: ['.ts', '.tsx', '.mts', '.js', '.jsx', '.mjs', '.json']
   },
   plugins: [
     {
@@ -77,6 +78,9 @@ export default defineConfig(async () => ({
     })
   ],
   clearScreen: false,
+  worker: {
+    format: 'es'
+  },
   server: {
     port: 1420,
     strictPort: true,

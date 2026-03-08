@@ -4,6 +4,7 @@ import { SceneGraph } from '../scene-graph'
 import { guidToString, nodeChangeToProps, sortChildren } from './kiwi-convert'
 import { populateAndApplyOverrides } from './instance-overrides'
 import type { InstanceNodeChange } from './instance-overrides'
+import { profileStage, profileStart } from './fig-parse-profile'
 
 import type { NodeChange } from './codec'
 
@@ -12,6 +13,7 @@ export function importNodeChanges(
   blobs: Uint8Array[] = [],
   images?: Map<string, Uint8Array>
 ): SceneGraph {
+  const t0 = profileStart()
   const graph = new SceneGraph()
 
   if (images) {
@@ -46,11 +48,14 @@ export function importNodeChanges(
       siblings.push(id)
     }
   }
+  profileStage('4a_buildChangeMap', t0)
 
+  const t1 = profileStart()
   for (const [parentId, children] of childrenMap) {
     const parentNc = changeMap.get(parentId)
     if (parentNc) sortChildren(children, parentNc, changeMap)
   }
+  profileStage('4b_sortChildren', t1)
 
   function getChildren(ncId: string): string[] {
     return childrenMap.get(ncId) ?? []
@@ -142,6 +147,7 @@ export function importNodeChanges(
     }
   }
 
+  const t2 = profileStart()
   if (docId) {
     // Import pages (CANVAS nodes) and their children
     for (const canvasId of getChildren(docId)) {
@@ -170,22 +176,29 @@ export function importNodeChanges(
       createSceneNode(rootId, page.id)
     }
   }
+  profileStage('4c_createSceneNodes', t2)
 
+  const t3 = profileStart()
   importVariables()
+  profileStage('4d_importVariables', t3)
 
+  const t4 = profileStart()
   // Remap componentId from original Figma GUIDs to imported node IDs
   for (const node of graph.getAllNodes()) {
     if (node.type !== 'INSTANCE' || !node.componentId) continue
     const remapped = guidToNodeId.get(node.componentId)
     if (remapped) node.componentId = remapped
   }
+  profileStage('4e_remapComponentIds', t4)
 
+  const t5 = profileStart()
   populateAndApplyOverrides(
     graph,
     changeMap as unknown as Map<string, InstanceNodeChange>,
     guidToNodeId,
     blobs
   )
+  profileStage('4f_populateAndApplyOverrides', t5)
 
   // Ensure at least one page exists
   if (graph.getPages(true).length === 0) {

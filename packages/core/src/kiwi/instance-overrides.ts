@@ -1,5 +1,6 @@
 import type { SceneGraph, SceneNode, GeometryPath } from '../scene-graph'
 import { guidToString, convertOverrideToProps, resolveGeometryPaths } from './kiwi-convert'
+import { profileStage, profileStart } from './fig-parse-profile'
 import type { GUID } from './codec'
 
 interface SymbolOverride {
@@ -60,6 +61,7 @@ export function populateAndApplyOverrides(
   guidToNodeId: Map<string, string>,
   blobs: Uint8Array[] = []
 ): void {
+  const t0 = profileStart()
   // Iterative population: cloning creates new instances that themselves need children
   let populated = 1
   while (populated > 0) {
@@ -73,7 +75,9 @@ export function populateAndApplyOverrides(
       }
     }
   }
+  profileStage('4f1_populateInstanceChildren', t0)
 
+  const t1 = profileStart()
   // Build overrideKey → figmaGuid map
   const overrideKeyToGuid = new Map<string, string>()
   for (const [id, nc] of changeMap) {
@@ -105,6 +109,7 @@ export function populateAndApplyOverrides(
   for (const node of graph.getAllNodes()) {
     if (node.componentId) getPreComputedRoot(node.id)
   }
+  profileStage('4f2_buildMapsAndPrecomputeRoot', t1)
 
   // Component root resolution (walks componentId chain to the ultimate source)
   const componentIdRoot = new Map<string, string>()
@@ -643,13 +648,21 @@ export function populateAndApplyOverrides(
   // 3. componentProperties — toggle visibility / swap via prop assignments
   //    (must run AFTER sync so repopulated children aren't lost)
   // 4. derivedSymbolData — apply Figma's pre-computed sizes last
+  const t2 = profileStart()
   const overriddenNodes = applySymbolOverrides()
+  profileStage('4f3_applySymbolOverrides', t2)
 
+  const t3 = profileStart()
   propagateOverridesTransitively(overriddenNodes)
+  profileStage('4f4_propagateOverridesTransitively', t3)
 
+  const t4 = profileStart()
   applyComponentProperties()
+  profileStage('4f5_applyComponentProperties', t4)
 
+  const t5 = profileStart()
   // DSD resolution runs AFTER overrides so guidPaths can reach children
   // of instance-swapped nodes (repopulateInstance replaces children).
   applyDerivedSymbolData()
+  profileStage('4f6_applyDerivedSymbolData', t5)
 }

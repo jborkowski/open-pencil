@@ -4,8 +4,9 @@ import { decompress as zstdDecompress } from 'fzstd'
 import { importNodeChanges } from './fig-import'
 import { decodeBinarySchema, compileSchema, ByteBuffer } from './kiwi-schema'
 import { isZstdCompressed } from './protocol'
+import { profileStage, profileStart } from './fig-parse-profile'
 
-import type { SceneGraph } from '../scene-graph'
+import { SceneGraph } from '../scene-graph'
 import type { FigmaMessage } from './codec'
 
 export interface FigKiwiPayload {
@@ -18,7 +19,7 @@ export interface FigKiwiPayload {
  * Exported for test fixture extraction (extract-kiwi-fixture).
  */
 export function parseFigKiwiContainer(data: Uint8Array): FigKiwiPayload | null {
-  const header = new TextDecoder().decode(data.slice(0, 8))
+  const header = new TextDecoder().decode(data.subarray(0, 8))
   if (header !== 'fig-kiwi') return null
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
@@ -28,7 +29,7 @@ export function parseFigKiwiContainer(data: Uint8Array): FigKiwiPayload | null {
   while (offset < data.length) {
     const len = view.getUint32(offset, true)
     offset += 4
-    chunks.push(data.slice(offset, offset + len))
+    chunks.push(data.subarray(offset, offset + len))
     offset += len
   }
   if (chunks.length < 2) return null
@@ -49,9 +50,12 @@ export function parseFigKiwiContainer(data: Uint8Array): FigKiwiPayload | null {
 }
 
 export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
+  const t0 = profileStart()
   const zip = unzipSync(new Uint8Array(buffer))
-  const entries = Object.keys(zip)
+  profileStage('1_unzipSync', t0)
 
+  const t1 = profileStart()
+  const entries = Object.keys(zip)
   let canvasData: Uint8Array | null = null
   for (const name of entries) {
     if (name === 'canvas.fig' || name === 'canvas') {
@@ -70,25 +74,28 @@ export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
       }
     }
   }
-
   if (!canvasData) {
     throw new Error(`No canvas data found in .fig file. Entries: ${entries.join(', ')}`)
   }
-
   const payload = parseFigKiwiContainer(canvasData)
   if (!payload) throw new Error('Invalid fig-kiwi container')
 
+  const t2 = profileStart()
   const schemaBytes = inflateSync(payload.schemaDeflated)
-  let message: FigmaMessage
+  profileStage('2_inflateSchema', t2)
 
+  let message: FigmaMessage
+  const t3 = profileStart()
   try {
     const wasm = await import('@open-pencil/kiwi-wasm')
     await wasm.default()
     message = wasm.decode_figma_message(schemaBytes, payload.dataRaw) as FigmaMessage
+    profileStage('3_kiwiDecode_wasm', t3)
   } catch {
     const schema = decodeBinarySchema(new ByteBuffer(schemaBytes))
     const compiled = compileSchema(schema) as { decodeMessage(data: Uint8Array): unknown }
     message = compiled.decodeMessage(payload.dataRaw) as FigmaMessage
+    profileStage('3_kiwiDecode_js', t3)
   }
 
   const nodeChanges = message.nodeChanges
@@ -109,7 +116,10 @@ export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
     }
   }
 
-  return importNodeChanges(nodeChanges, blobs, images)
+  const t4 = profileStart()
+  const graph = importNodeChanges(nodeChanges, blobs, images)
+  profileStage('4_importNodeChanges', t4)
+  return graph
 }
 
 /**
@@ -118,5 +128,41 @@ export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
 export async function readFigFile(file: File): Promise<SceneGraph> {
   const buffer = await file.arrayBuffer()
   return parseFigFile(buffer)
+}
+
+/**
+ * Parse a .fig file in a Web Worker to keep the main thread responsive.
+ * Use when `typeof Worker !== 'undefined'` (browser). Falls back not supported — call parseFigFile directly.
+ * Pass profile: true to collect and return stage timings (for performance investigation).
+ */
+export function parseFigFileInWorker(
+  buffer: ArrayBuffer,
+  options?: { profile?: boolean }
+): Promise<SceneGraph> {
+  const profile = options?.profile ?? false
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./fig-file.worker.ts', import.meta.url), {
+      type: 'module'
+    })
+    worker.onmessage = (e: MessageEvent<{ type: string; data?: unknown; message?: string; profile?: Array<{ stage: string; ms: number }> }>) => {
+      worker.terminate()
+      if (e.data.type === 'success' && e.data.data) {
+        if (profile && e.data.profile) {
+          ;(globalThis as unknown as { __FIG_PARSE_PROFILE_RESULT__?: Array<{ stage: string; ms: number }> }).__FIG_PARSE_PROFILE_RESULT__ =
+            e.data.profile
+        }
+        resolve(SceneGraph.fromPlainData(e.data.data as Parameters<typeof SceneGraph.fromPlainData>[0]))
+      } else if (e.data.type === 'error' && e.data.message) {
+        reject(new Error(e.data.message))
+      } else {
+        reject(new Error('Unknown worker response'))
+      }
+    }
+    worker.onerror = (err) => {
+      worker.terminate()
+      reject(err)
+    }
+    worker.postMessage(profile ? { buffer, profile: true } : buffer, { transfer: [buffer] })
+  })
 }
 
