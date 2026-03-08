@@ -79,9 +79,17 @@ export async function parseFigFile(buffer: ArrayBuffer): Promise<SceneGraph> {
   if (!payload) throw new Error('Invalid fig-kiwi container')
 
   const schemaBytes = inflateSync(payload.schemaDeflated)
-  const schema = decodeBinarySchema(new ByteBuffer(schemaBytes))
-  const compiled = compileSchema(schema) as { decodeMessage(data: Uint8Array): unknown }
-  const message = compiled.decodeMessage(payload.dataRaw) as FigmaMessage
+  let message: FigmaMessage
+
+  try {
+    const wasm = await import('@open-pencil/kiwi-wasm')
+    await wasm.default()
+    message = wasm.decode_figma_message(schemaBytes, payload.dataRaw) as FigmaMessage
+  } catch {
+    const schema = decodeBinarySchema(new ByteBuffer(schemaBytes))
+    const compiled = compileSchema(schema) as { decodeMessage(data: Uint8Array): unknown }
+    message = compiled.decodeMessage(payload.dataRaw) as FigmaMessage
+  }
 
   const nodeChanges = message.nodeChanges
   if (!nodeChanges || nodeChanges.length === 0) {
