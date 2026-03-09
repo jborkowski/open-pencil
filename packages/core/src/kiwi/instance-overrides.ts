@@ -1,8 +1,9 @@
 import type { SceneGraph, SceneNode, GeometryPath } from '../scene-graph'
-import { copyFills, copyStrokes, copyEffects, copyStyleRuns } from '../copy'
 import { guidToString, convertOverrideToProps, resolveGeometryPaths } from './kiwi-convert'
+import { copyFills, copyStrokes, copyEffects, copyStyleRuns, copyGeometryPaths } from '../copy'
 import { profileStage, profileStart } from './fig-parse-profile'
 import type { GUID } from './codec'
+import type { Matrix, Vector } from '../types'
 
 interface SymbolOverride {
   guidPath?: { guids?: GUID[] }
@@ -28,8 +29,8 @@ interface ComponentPropAssignment {
 
 interface DerivedSymbolOverride {
   guidPath?: { guids?: GUID[] }
-  size?: { x: number; y: number }
-  transform?: { m00: number; m01: number; m02: number; m10: number; m11: number; m12: number }
+  size?: Vector
+  transform?: Matrix
   fillGeometry?: Array<{ windingRule?: string; commandsBlob?: number }>
   strokeGeometry?: Array<{ windingRule?: string; commandsBlob?: number }>
 }
@@ -62,92 +63,40 @@ export function populateAndApplyOverrides(
   guidToNodeId: Map<string, string>,
   blobs: Uint8Array[] = []
 ): void {
-  const t0 = profileStart()
-  // Work queue: avoid full getAllNodes() scan per iteration. Collect empty instances
-  // once, then process; new instances from populateInstanceChildren go on the queue.
-  const queue: string[] = []
+  // Work-queue population: seed with empty instances, then discover newly
+  // cloned nested instances by walking the subtree (avoids full graph scan per round).
+  const populateQueue: string[] = []
   for (const node of graph.getAllNodes()) {
-    if (node.type !== 'INSTANCE' || !node.componentId || node.childIds.length > 0) continue
-    const comp = graph.getNode(node.componentId)
-    if (comp?.childIds.length) queue.push(node.id)
+    if (node.type === 'INSTANCE' && node.componentId && node.childIds.length === 0) {
+      populateQueue.push(node.id)
+    }
   }
-  while (queue.length > 0) {
-    const instanceId = queue.shift() as string
-    const node = graph.getNode(instanceId)
-    if (!node || node.type !== 'INSTANCE' || !node.componentId || node.childIds.length > 0)
-      continue
-    const comp = graph.getNode(node.componentId)
-    if (!comp?.childIds.length) continue
-    graph.populateInstanceChildren(node.id, node.componentId)
-    for (const childId of node.childIds) {
+
+  function collectEmptyInstances(parentId: string, out: string[]) {
+    const parent = graph.getNode(parentId)
+    if (!parent) return
+    for (const childId of parent.childIds) {
       const child = graph.getNode(childId)
-      if (child?.type === 'INSTANCE' && child.componentId && child.childIds.length === 0) {
-        const c = graph.getNode(child.componentId)
-        if (c?.childIds.length) queue.push(childId)
+      if (!child) continue
+      if (child.type === 'INSTANCE' && child.componentId && child.childIds.length === 0) {
+        out.push(child.id)
+      } else if (child.childIds.length > 0) {
+        collectEmptyInstances(childId, out)
       }
     }
   }
-  profileStage('4f1_populateInstanceChildren', t0)
 
-  // Build componentId → child nodeId index for fast lookups.
-  // Maps parentId → (componentId → nodeId[]) for O(1) child-by-component lookup.
-  const childrenByComponentId = new Map<string, Map<string, string[]>>()
-
-  function buildComponentIndex() {
-    childrenByComponentId.clear()
-    for (const node of graph.getAllNodes()) {
-      if (!node.parentId || !node.componentId) continue
-      let parentMap = childrenByComponentId.get(node.parentId)
-      if (!parentMap) {
-        parentMap = new Map()
-        childrenByComponentId.set(node.parentId, parentMap)
-      }
-      let arr = parentMap.get(node.componentId)
-      if (!arr) {
-        arr = []
-        parentMap.set(node.componentId, arr)
-      }
-      arr.push(node.id)
+  while (populateQueue.length > 0) {
+    const nodeId = populateQueue.pop()!
+    const node = graph.getNode(nodeId)
+    if (node?.type !== 'INSTANCE' || !node.componentId || node.childIds.length > 0) continue
+    const comp = graph.getNode(node.componentId)
+    if (comp && comp.childIds.length > 0) {
+      graph.populateInstanceChildren(nodeId, node.componentId)
+      collectEmptyInstances(nodeId, populateQueue)
     }
   }
 
-  function updateIndexForInstance(
-    parentId: string,
-    oldChildEntries: Array<{ id: string; componentId: string }>,
-    newChildIds: string[]
-  ) {
-    let parentMap = childrenByComponentId.get(parentId)
-    if (parentMap) {
-      for (const { id: childId, componentId } of oldChildEntries) {
-        const arr = parentMap.get(componentId)
-        if (arr) {
-          const i = arr.indexOf(childId)
-          if (i >= 0) arr.splice(i, 1)
-          if (arr.length === 0) parentMap.delete(componentId)
-        }
-      }
-      if (parentMap.size === 0) childrenByComponentId.delete(parentId)
-    }
-
-    for (const childId of newChildIds) {
-      const child = graph.getNode(childId)
-      if (!child?.componentId) continue
-      parentMap = childrenByComponentId.get(parentId)
-      if (!parentMap) {
-        parentMap = new Map()
-        childrenByComponentId.set(parentId, parentMap)
-      }
-      let arr = parentMap.get(child.componentId)
-      if (!arr) {
-        arr = []
-        parentMap.set(child.componentId, arr)
-      }
-      arr.push(childId)
-    }
-  }
-  buildComponentIndex()
-
-  const t1 = profileStart()
   // Build overrideKey → figmaGuid map
   const overrideKeyToGuid = new Map<string, string>()
   for (const [id, nc] of changeMap) {
@@ -179,7 +128,6 @@ export function populateAndApplyOverrides(
   for (const node of graph.getAllNodes()) {
     if (node.componentId) getPreComputedRoot(node.id)
   }
-  profileStage('4f2_buildMapsAndPrecomputeRoot', t1)
 
   // Component root resolution (walks componentId chain to the ultimate source)
   const componentIdRoot = new Map<string, string>()
@@ -218,17 +166,17 @@ export function populateAndApplyOverrides(
   }
 
   function findNodeByComponentId(parentId: string, componentId: string): string | null {
-    // Pass 1: exact componentId match via index (O(1) instead of linear scan)
-    const parentMap = childrenByComponentId.get(parentId)
-    if (parentMap) {
-      const exact = parentMap.get(componentId)
-      if (exact?.length) return exact[0]
-    }
-
-    // Pass 2: root match — but only if exactly one child shares the root
     const parent = graph.getNode(parentId)
     if (!parent) return null
 
+    // Pass 1: exact componentId match on direct children
+    for (const childId of parent.childIds) {
+      const child = graph.getNode(childId)
+      if (child?.componentId === componentId) return childId
+    }
+
+    // Pass 2: root match — but only if exactly one child shares the root
+    // (multiple siblings with the same root are ambiguous)
     const targetRoot = preComputedRoot.get(componentId) ?? getComponentRoot(componentId)
     if (targetRoot) {
       let rootMatch: string | null = null
@@ -245,7 +193,7 @@ export function populateAndApplyOverrides(
       if (rootMatch && !ambiguous) return rootMatch
     }
 
-    // Pass 3: recurse into children (rare — only when passes 1 & 2 fail)
+    // Pass 3: recurse into children
     for (const childId of parent.childIds) {
       const deep = findNodeByComponentId(childId, componentId)
       if (deep) return deep
@@ -298,162 +246,53 @@ export function populateAndApplyOverrides(
 
   function repopulateInstance(nodeId: string, compId: string) {
     const node = graph.getNode(nodeId)
-    if (!node || node.type !== 'INSTANCE') return
+    if (node?.type !== 'INSTANCE') return
 
-    const oldChildEntries = node.childIds
-      .map((id) => {
-        const c = graph.getNode(id)
-        return c?.componentId ? { id, componentId: c.componentId } : null
-      })
-      .filter((e): e is { id: string; componentId: string } => e != null)
-    const childIdsToDelete = [...node.childIds]
-    for (const childId of childIdsToDelete) graph.deleteNode(childId)
+    for (const childId of [...node.childIds]) graph.deleteNode(childId)
     graph.updateNode(nodeId, { componentId: compId })
     const comp = graph.getNode(compId)
-    let newChildIds: string[] = []
     if (comp && comp.childIds.length > 0) {
       graph.populateInstanceChildren(nodeId, compId)
-      const updated = graph.getNode(nodeId)
-      newChildIds = updated?.childIds ?? []
     }
     componentIdRoot.clear()
-    updateIndexForInstance(nodeId, oldChildEntries, newChildIds)
   }
 
-  function applyComponentProperties() {
-    const tp0 = profileStart()
-    const propRefsMap = new Map<string, ComponentPropRef[]>()
-    for (const [figmaId, nc] of changeMap) {
-      if (nc.componentPropRefs?.length) {
-        propRefsMap.set(figmaId, nc.componentPropRefs)
-      }
+  function assignmentsToValueMap(assignments: ComponentPropAssignment[]): Map<string, ComponentPropAssignment['value']> {
+    const valueByDef = new Map<string, ComponentPropAssignment['value']>()
+    for (const a of assignments) {
+      valueByDef.set(guidToString(a.defID), a.value)
     }
-    if (propRefsMap.size === 0) return
-    profileStage('4f5a_buildPropRefsMap', tp0)
+    return valueByDef
+  }
 
-    // Memoize findPropRefs by componentId — clones sharing the same
-    // componentId pay the chain-walk cost exactly once.
-    const propRefsCache = new Map<string, ComponentPropRef[] | null>()
-    function findPropRefsCached(compId: string): ComponentPropRef[] | null {
-      const cached = propRefsCache.get(compId)
-      if (cached !== undefined) return cached
-      const refs = findPropRefs(compId, propRefsMap) ?? null
-      propRefsCache.set(compId, refs)
-      return refs
-    }
-
-    const tp1 = profileStart()
-    // Collect all assignment sources: figmaGuid → assignments[]
-    const assignmentSources = new Map<string, ComponentPropAssignment[]>()
-    for (const [figmaId, nc] of changeMap) {
-      if (nc.componentPropAssignments?.length) {
-        assignmentSources.set(figmaId, nc.componentPropAssignments)
-      }
-    }
-
-    // Pre-build merged assignment map per INSTANCE.
-    // Merge own + source assignments into a single map per instance.
-    // Source (component defaults) overwrites own — matching current behavior
-    // where source applyPropAssignments runs AFTER own.
-    const instanceAssignments = new Map<string, Map<string, ComponentPropAssignment['value']>>()
+  function applyInstanceDirectAssignments(
+    assignmentSources: Map<string, ComponentPropAssignment[]>,
+    propRefsMap: Map<string, ComponentPropRef[]>
+  ) {
     for (const node of graph.getAllNodes()) {
       if (node.type !== 'INSTANCE') continue
-      const merged = new Map<string, ComponentPropAssignment['value']>()
-
-      // Own assignments first
+      // Apply assignments from the instance's own kiwi data first
       const ownFigmaId = nodeIdToGuid.get(node.id)
       if (ownFigmaId) {
         const ownAssignments = assignmentSources.get(ownFigmaId)
         if (ownAssignments) {
-          for (const a of ownAssignments) {
-            if (a.defID) merged.set(guidToString(a.defID), a.value)
-          }
+          applyPropAssignments(node.id, assignmentsToValueMap(ownAssignments), propRefsMap)
         }
       }
 
-      // Source (component default) assignments overwrite own
-      if (node.componentId) {
-        const sourceFigmaId = nodeIdToGuid.get(node.componentId)
-        if (sourceFigmaId) {
-          const sourceAssignments = assignmentSources.get(sourceFigmaId)
-          if (sourceAssignments) {
-            for (const a of sourceAssignments) {
-              if (a.defID) merged.set(guidToString(a.defID), a.value)
-            }
-          }
-        }
-      }
-
-      if (merged.size > 0) instanceAssignments.set(node.id, merged)
-    }
-    profileStage('4f5b_buildAssignmentMaps', tp1)
-
-    const tp2 = profileStart()
-    // Find all nodes with relevant propRefs in a single graph scan.
-    const relevantNodes: Array<{ nodeId: string; refs: ComponentPropRef[] }> = []
-    for (const node of graph.getAllNodes()) {
+      // Also apply from cloned instance sources — after population, cloned
+      // instances have componentId pointing to the original kiwi node
       if (!node.componentId) continue
-      const refs = findPropRefsCached(node.componentId)
-      if (refs) relevantNodes.push({ nodeId: node.id, refs })
+      const sourceFigmaId = nodeIdToGuid.get(node.componentId)
+      if (!sourceFigmaId) continue
+      const assignments = assignmentSources.get(sourceFigmaId)
+      if (!assignments) continue
+
+      applyPropAssignments(node.id, assignmentsToValueMap(assignments), propRefsMap)
     }
-    profileStage('4f5c_findRelevantNodes', tp2)
+  }
 
-    const tp3 = profileStart()
-    // Bottom-up: for each relevant node, walk UP to collect ancestor
-    // INSTANCE assignments. Apply outermost first so innermost overwrites
-    // (last write wins via graph.updateNode → Object.assign), matching the
-    // current top-down behavior where parents are visited before children.
-    for (const { nodeId, refs } of relevantNodes) {
-      const ancestors: Array<Map<string, ComponentPropAssignment['value']>> = []
-      let cur = graph.getNode(nodeId)
-      while (cur?.parentId) {
-        const parent = graph.getNode(cur.parentId)
-        if (!parent) break
-        const assignments = instanceAssignments.get(parent.id)
-        if (assignments) ancestors.push(assignments)
-        cur = parent
-      }
-
-      if (ancestors.length === 0) continue
-
-      // Apply outermost first (ancestors collected innermost-first, reverse)
-      for (let i = ancestors.length - 1; i >= 0; i--) {
-        const valueByDef = ancestors[i]
-        for (const ref of refs) {
-          if (!ref.defID) continue
-          const val = valueByDef.get(guidToString(ref.defID))
-          if (!val) continue
-
-          if (ref.componentPropNodeField === 'VISIBLE' && val.boolValue !== undefined) {
-            graph.updateNode(nodeId, { visible: val.boolValue })
-          } else if (ref.componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID') {
-            const swapId = val.textValue ?? (val.guidValue ? guidToString(val.guidValue) : undefined)
-            if (!swapId) continue
-            const newCompId = guidToNodeId.get(swapId)
-            if (newCompId) repopulateInstance(nodeId, newCompId)
-          }
-        }
-      }
-    }
-    profileStage('4f5d_applyAssignmentsBottomUp', tp3)
-
-    // Pre-compute which nodeIds have at least one descendant with relevant
-    // propRefs, for pruning the symbolOverride-scoped recursion in Step 4.
-    const hasRelevantDescendant = new Set<string>()
-    for (const { nodeId } of relevantNodes) {
-      let cur: string | undefined = nodeId
-      while (cur) {
-        if (hasRelevantDescendant.has(cur)) break
-        hasRelevantDescendant.add(cur)
-        const n = graph.getNode(cur)
-        cur = n?.parentId ?? undefined
-      }
-    }
-
-    const tp4 = profileStart()
-    // Step 4: symbolOverride-scoped assignments. These override the
-    // defaults set above, scoped to the nested instance their guidPath
-    // resolves to. Uses pruned recursion via hasRelevantDescendant.
+  function applySymbolOverrideAssignments(propRefsMap: Map<string, ComponentPropRef[]>) {
     for (const [figmaId, nc] of changeMap) {
       const instanceNodeId = guidToNodeId.get(figmaId)
       if (!instanceNodeId) continue
@@ -470,47 +309,64 @@ export function populateAndApplyOverrides(
         const targetId = resolveOverrideTarget(instanceNodeId, guids)
         if (!targetId) continue
 
-        const valueByDef = new Map<string, ComponentPropAssignment['value']>()
-        for (const a of ov.componentPropAssignments) {
-          if (a.defID) valueByDef.set(guidToString(a.defID), a.value)
-        }
-        applyPropAssignmentsPruned(targetId, valueByDef)
+        applyPropAssignments(targetId, assignmentsToValueMap(ov.componentPropAssignments), propRefsMap)
       }
     }
-    profileStage('4f5e_applySymbolOverrideAssignments', tp4)
+  }
 
-    // Pruned version: skip branches without relevant descendants
-    function applyPropAssignmentsPruned(
-      parentId: string,
-      valueByDef: Map<string, ComponentPropAssignment['value']>
-    ) {
-      const parent = graph.getNode(parentId)
-      if (!parent) return
-      for (const childId of parent.childIds) {
-        if (!hasRelevantDescendant.has(childId)) continue
-        const child = graph.getNode(childId)
-        if (!child?.componentId) {
-          applyPropAssignmentsPruned(childId, valueByDef)
-          continue
-        }
-        const refs = findPropRefsCached(child.componentId)
-        if (refs) {
-          for (const ref of refs) {
-            if (!ref.defID) continue
-            const val = valueByDef.get(guidToString(ref.defID))
-            if (!val) continue
-            if (ref.componentPropNodeField === 'VISIBLE' && val.boolValue !== undefined) {
-              graph.updateNode(childId, { visible: val.boolValue })
-            } else if (ref.componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID') {
-              const swapId = val.textValue ?? (val.guidValue ? guidToString(val.guidValue) : undefined)
-              if (!swapId) continue
-              const newCompId = guidToNodeId.get(swapId)
-              if (newCompId) repopulateInstance(childId, newCompId)
-            }
+  function applyComponentProperties() {
+    const propRefsMap = new Map<string, ComponentPropRef[]>()
+    for (const [figmaId, nc] of changeMap) {
+      if (nc.componentPropRefs?.length) {
+        propRefsMap.set(figmaId, nc.componentPropRefs)
+      }
+    }
+    if (propRefsMap.size === 0) return
+
+    const assignmentSources = new Map<string, ComponentPropAssignment[]>()
+    for (const [figmaId, nc] of changeMap) {
+      if (nc.componentPropAssignments?.length) {
+        assignmentSources.set(figmaId, nc.componentPropAssignments)
+      }
+    }
+
+    applyInstanceDirectAssignments(assignmentSources, propRefsMap)
+    applySymbolOverrideAssignments(propRefsMap)
+  }
+
+  function applyPropAssignments(
+    parentId: string,
+    valueByDef: Map<string, ComponentPropAssignment['value']>,
+    propRefsMap: Map<string, ComponentPropRef[]>
+  ) {
+    const parent = graph.getNode(parentId)
+    if (!parent) return
+
+    for (const childId of parent.childIds) {
+      const child = graph.getNode(childId)
+      if (!child?.componentId) {
+        applyPropAssignments(childId, valueByDef, propRefsMap)
+        continue
+      }
+
+      const refs = findPropRefs(child.componentId, propRefsMap)
+      if (refs) {
+        for (const ref of refs) {
+          const val = valueByDef.get(guidToString(ref.defID))
+          if (!val) continue
+
+          if (ref.componentPropNodeField === 'VISIBLE' && val.boolValue !== undefined) {
+            graph.updateNode(childId, { visible: val.boolValue })
+          } else if (ref.componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID') {
+            const swapId = val.textValue ?? (val.guidValue ? guidToString(val.guidValue) : undefined)
+            if (!swapId) continue
+            const newCompId = guidToNodeId.get(swapId)
+            if (newCompId) repopulateInstance(childId, newCompId)
           }
         }
-        applyPropAssignmentsPruned(childId, valueByDef)
       }
+
+      applyPropAssignments(childId, valueByDef, propRefsMap)
     }
   }
 
@@ -528,7 +384,7 @@ export function populateAndApplyOverrides(
       while (o < scaled.length) {
         const cmd = scaled[o++]
         if (cmd === 0) continue
-        const coords = cmd === 1 || cmd === 2 ? 1 : cmd === 4 ? 3 : -1
+        const coords = cmd === 1 || cmd === 2 ? 1 : (cmd === 4 ? 3 : -1)
         if (coords < 0) {
           console.warn(`scaleGeometryBlobs: unknown path command ${cmd} at offset ${o - 1}`)
           break
@@ -543,7 +399,27 @@ export function populateAndApplyOverrides(
     })
   }
 
-  function applyDerivedSymbolData() {
+  function resolveDsdGeometry(
+    d: DerivedSymbolOverride,
+    target: SceneNode
+  ): Pick<Partial<SceneNode>, 'fillGeometry' | 'strokeGeometry'> {
+    const result: Pick<Partial<SceneNode>, 'fillGeometry' | 'strokeGeometry'> = {}
+    const fg = resolveGeometryPaths(d.fillGeometry, blobs)
+    const sg = resolveGeometryPaths(d.strokeGeometry, blobs)
+    if (fg.length > 0) {
+      result.fillGeometry = fg
+    } else if (d.size && target.fillGeometry.length > 0 && target.width > 0 && target.height > 0) {
+      result.fillGeometry = scaleGeometryBlobs(target.fillGeometry, d.size.x / target.width, d.size.y / target.height)
+    }
+    if (sg.length > 0) {
+      result.strokeGeometry = sg
+    } else if (d.size && target.strokeGeometry.length > 0 && target.width > 0 && target.height > 0) {
+      result.strokeGeometry = scaleGeometryBlobs(target.strokeGeometry, d.size.x / target.width, d.size.y / target.height)
+    }
+    return result
+  }
+
+  function resolveDsdUpdates(): { dsdModified: Set<string>; dsdSizeSet: Set<string> } {
     const dsdModified = new Set<string>()
     const dsdSizeSet = new Set<string>()
 
@@ -555,8 +431,7 @@ export function populateAndApplyOverrides(
       const nodeId = guidToNodeId.get(ncId)
       if (!nodeId) continue
 
-      for (let i = 0; i < derived.length; i++) {
-        const d = derived[i]
+      for (const d of derived) {
         const guids = d.guidPath?.guids
         if (!guids?.length) continue
 
@@ -575,18 +450,7 @@ export function populateAndApplyOverrides(
           updates.x = d.transform.m02
           updates.y = d.transform.m12
         }
-        const fg = resolveGeometryPaths(d.fillGeometry, blobs)
-        const sg = resolveGeometryPaths(d.strokeGeometry, blobs)
-        if (fg.length > 0) {
-          updates.fillGeometry = fg
-        } else if (d.size && target.fillGeometry.length > 0 && target.width > 0 && target.height > 0) {
-          updates.fillGeometry = scaleGeometryBlobs(target.fillGeometry, d.size.x / target.width, d.size.y / target.height)
-        }
-        if (sg.length > 0) {
-          updates.strokeGeometry = sg
-        } else if (d.size && target.strokeGeometry.length > 0 && target.width > 0 && target.height > 0) {
-          updates.strokeGeometry = scaleGeometryBlobs(target.strokeGeometry, d.size.x / target.width, d.size.y / target.height)
-        }
+        Object.assign(updates, resolveDsdGeometry(d, target))
 
         if (Object.keys(updates).length > 0) {
           graph.updateNode(targetId, updates)
@@ -596,58 +460,47 @@ export function populateAndApplyOverrides(
       }
     }
 
-    // Propagate DSD changes through clone chains. Each clone should match
-    // its source (componentId) for size/position/geometry. Iterate until
-    // convergence so deeper clone levels receive updates even when
-    // intermediate clones were also directly DSD-targeted (e.g., a DSD
-    // entry set only geometry on an intermediate clone — its size must
-    // still be inherited from the source).
-    //
-    // Nodes whose size was explicitly set by DSD (in dsdSizeSet) keep
-    // their own values; nodes only touched for position/geometry inherit
-    // size from their source.
-    if (dsdModified.size > 0) {
-      const clonesOf = new Map<string, string[]>()
-      for (const node of graph.getAllNodes()) {
-        if (!node.componentId) continue
-        let arr = clonesOf.get(node.componentId)
-        if (!arr) {
-          arr = []
-          clonesOf.set(node.componentId, arr)
-        }
-        arr.push(node.id)
-      }
+    return { dsdModified, dsdSizeSet }
+  }
 
-      // BFS from DSD-modified nodes. Unlike the old version, intermediate
-      // clones that are also in dsdModified are NOT skipped — they act as
-      // chain links. Nodes in dsdSizeSet keep their explicit size but still
-      // propagate to their clones.
-      const queue = [...dsdModified]
-      const visited = new Set<string>()
-      for (let sourceId = queue.shift(); sourceId !== undefined; sourceId = queue.shift()) {
-        const source = graph.getNode(sourceId)
-        if (!source) continue
-        const clones = clonesOf.get(sourceId)
-        if (!clones) continue
-        for (const cloneId of clones) {
-          if (visited.has(cloneId)) continue
-          visited.add(cloneId)
-          const clone = graph.getNode(cloneId)
-          if (!clone) continue
-          if (!dsdSizeSet.has(cloneId)) {
-            const cu: Partial<SceneNode> = {}
-            if (source.width !== clone.width) cu.width = source.width
-            if (source.height !== clone.height) cu.height = source.height
-            if (source.x !== clone.x) cu.x = source.x
-            if (source.y !== clone.y) cu.y = source.y
-            if (source.fillGeometry !== clone.fillGeometry) cu.fillGeometry = source.fillGeometry
-            if (source.strokeGeometry !== clone.strokeGeometry) cu.strokeGeometry = source.strokeGeometry
-            if (Object.keys(cu).length > 0) graph.updateNode(cloneId, cu)
-          }
-          queue.push(cloneId)
+  // Propagate DSD changes through clone chains — each clone should match
+  // its source for size/position/geometry. Nodes whose size was explicitly
+  // set by DSD keep their own values; others inherit from their source.
+  function propagateDsdChanges(dsdModified: Set<string>, dsdSizeSet: Set<string>) {
+    if (dsdModified.size === 0) return
+
+    const clonesOf = buildClonesMap()
+
+    const queue = [...dsdModified]
+    const visited = new Set<string>()
+    for (let sourceId = queue.shift(); sourceId !== undefined; sourceId = queue.shift()) {
+      const source = graph.getNode(sourceId)
+      if (!source) continue
+      const clones = clonesOf.get(sourceId)
+      if (!clones) continue
+      for (const cloneId of clones) {
+        if (visited.has(cloneId)) continue
+        visited.add(cloneId)
+        const clone = graph.getNode(cloneId)
+        if (!clone) continue
+        if (!dsdSizeSet.has(cloneId)) {
+          const cu: Partial<SceneNode> = {}
+          if (source.width !== clone.width) cu.width = source.width
+          if (source.height !== clone.height) cu.height = source.height
+          if (source.x !== clone.x) cu.x = source.x
+          if (source.y !== clone.y) cu.y = source.y
+          if (source.fillGeometry !== clone.fillGeometry) cu.fillGeometry = copyGeometryPaths(source.fillGeometry)
+          if (source.strokeGeometry !== clone.strokeGeometry) cu.strokeGeometry = copyGeometryPaths(source.strokeGeometry)
+          if (Object.keys(cu).length > 0) graph.updateNode(cloneId, cu)
         }
+        queue.push(cloneId)
       }
     }
+  }
+
+  function applyDerivedSymbolData() {
+    const { dsdModified, dsdSizeSet } = resolveDsdUpdates()
+    propagateDsdChanges(dsdModified, dsdSizeSet)
   }
 
   function applySymbolOverrides(): Set<string> {
@@ -690,16 +543,16 @@ export function populateAndApplyOverrides(
 
   function syncNodeProps(source: SceneNode, target: SceneNode) {
     const updates: Partial<SceneNode> = {}
-    if (source.text !== undefined && source.text !== target.text) updates.text = source.text
-    if (source.visible !== undefined && source.visible !== target.visible) updates.visible = source.visible
-    if (source.opacity !== undefined && source.opacity !== target.opacity) updates.opacity = source.opacity
-    if (source.fills !== undefined && source.fills !== target.fills) updates.fills = copyFills(source.fills)
-    if (source.strokes !== undefined && source.strokes !== target.strokes) updates.strokes = copyStrokes(source.strokes)
-    if (source.effects !== undefined && source.effects !== target.effects) updates.effects = copyEffects(source.effects)
-    if (source.styleRuns !== undefined && source.styleRuns !== target.styleRuns) updates.styleRuns = copyStyleRuns(source.styleRuns)
-    if (source.layoutGrow !== undefined && source.layoutGrow !== target.layoutGrow) updates.layoutGrow = source.layoutGrow
-    if (source.textAutoResize !== undefined && source.textAutoResize !== target.textAutoResize) updates.textAutoResize = source.textAutoResize
-    if (source.locked !== undefined && source.locked !== target.locked) updates.locked = source.locked
+    if (source.text !== target.text) updates.text = source.text
+    if (source.visible !== target.visible) updates.visible = source.visible
+    if (source.opacity !== target.opacity) updates.opacity = source.opacity
+    if (source.fills !== target.fills) updates.fills = copyFills(source.fills)
+    if (source.strokes !== target.strokes) updates.strokes = copyStrokes(source.strokes)
+    if (source.effects !== target.effects) updates.effects = copyEffects(source.effects)
+    if (source.styleRuns !== target.styleRuns) updates.styleRuns = copyStyleRuns(source.styleRuns)
+    if (source.layoutGrow !== target.layoutGrow) updates.layoutGrow = source.layoutGrow
+    if (source.textAutoResize !== target.textAutoResize) updates.textAutoResize = source.textAutoResize
+    if (source.locked !== target.locked) updates.locked = source.locked
     if (Object.keys(updates).length > 0) graph.updateNode(target.id, updates)
   }
 
@@ -718,7 +571,7 @@ export function populateAndApplyOverrides(
     }
   }
 
-  function buildClonesOf(): Map<string, string[]> {
+  function buildClonesMap(): Map<string, string[]> {
     const clonesOf = new Map<string, string[]>()
     for (const node of graph.getAllNodes()) {
       if (!node.componentId) continue
@@ -732,13 +585,7 @@ export function populateAndApplyOverrides(
     return clonesOf
   }
 
-  function propagateOverridesTransitively(seeds: Set<string>, clonesOf: Map<string, string[]>) {
-    if (seeds.size === 0) return
-
-    // Also seed parent INSTANCE nodes of overridden children so their
-    // clones are visited by the BFS — deep overrides (e.g., stroke color
-    // on a Vector nested inside a check inside an _icon-xs) need the
-    // instance-level clone to be visited for syncChildrenDeep to propagate.
+  function expandSeedsToParents(seeds: Set<string>): Set<string> {
     const expandedSeeds = new Set(seeds)
     for (const seedId of seeds) {
       let cur = graph.getNode(seedId)
@@ -751,7 +598,10 @@ export function populateAndApplyOverrides(
         cur = parent
       }
     }
+    return expandedSeeds
+  }
 
+  function buildNeedsSyncSet(expandedSeeds: Set<string>, clonesOf: Map<string, string[]>): Set<string> {
     const needsSync = new Set<string>()
     const queue = [...expandedSeeds]
     for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
@@ -763,6 +613,28 @@ export function populateAndApplyOverrides(
         queue.push(cloneId)
       }
     }
+    return needsSync
+  }
+
+  function syncCloneFromSource(sourceId: string, source: SceneNode, node: SceneNode, seeds: Set<string>) {
+    syncNodeProps(source, node)
+    if (source.childIds.length !== node.childIds.length) {
+      const childIds = [...node.childIds]
+      for (const childId of childIds) graph.deleteNode(childId)
+      if (source.childIds.length > 0) {
+        graph.populateInstanceChildren(node.id, sourceId)
+      }
+    } else if (source.childIds.length > 0 && node.childIds.length > 0) {
+      syncChildrenDeep(sourceId, node.id, seeds)
+    }
+  }
+
+  function propagateOverridesTransitively(seeds: Set<string>) {
+    if (seeds.size === 0) return
+
+    const clonesOf = buildClonesMap()
+    const expandedSeeds = expandSeedsToParents(seeds)
+    const needsSync = buildNeedsSyncSet(expandedSeeds, clonesOf)
 
     const visited = new Set<string>()
     const syncQueue = [...expandedSeeds]
@@ -778,25 +650,13 @@ export function populateAndApplyOverrides(
         const node = graph.getNode(cloneId)
         if (!node) continue
 
-        // Don't overwrite nodes that were directly targeted by symbolOverrides
+        // Don't overwrite nodes directly targeted by symbolOverrides
         if (seeds.has(cloneId)) {
           syncQueue.push(cloneId)
           continue
         }
 
-        syncNodeProps(source, node)
-        // For structural changes (instance swaps change child count/type),
-        // re-clone from the SOURCE (not the component) to preserve the
-        // componentId chain for DSD propagation.
-        if (source.childIds.length !== node.childIds.length) {
-          for (const childId of [...node.childIds]) graph.deleteNode(childId)
-          if (source.childIds.length > 0) {
-            graph.populateInstanceChildren(node.id, sourceId)
-          }
-        } else if (source.childIds.length > 0 && node.childIds.length > 0) {
-          syncChildrenDeep(sourceId, cloneId, seeds)
-        }
-
+        syncCloneFromSource(sourceId, source, node, seeds)
         syncQueue.push(cloneId)
       }
     }
@@ -814,8 +674,7 @@ export function populateAndApplyOverrides(
   profileStage('4f3_applySymbolOverrides', t2)
 
   const t3 = profileStart()
-  const clonesOf = buildClonesOf()
-  propagateOverridesTransitively(overriddenNodes, clonesOf)
+  propagateOverridesTransitively(overriddenNodes)
   profileStage('4f4_propagateOverridesTransitively', t3)
 
   const t4 = profileStart()

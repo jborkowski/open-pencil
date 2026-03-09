@@ -122,12 +122,6 @@
       }
     },
     {
-      "files": ["packages/core/src/**"],
-      "rules": {
-        "complexity": "warn"
-      }
-    },
-    {
       "files": ["**/composables/use-collab.ts"],
       "rules": {
         "typescript/no-non-null-assertion": "off"
